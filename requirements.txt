@@ -1,9 +1,12 @@
 fastapi
 uvicorn
-openai
+pydantic
 python-dotenv
-pytesseract
+requests
+openai
 pillow
-pymupdf
+pytesseract
+pdfplumber
 pandas
 openpyxl
+opencv-python-headless
