@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-python-multipart
-pillow
-pytesseract
-PyMuPDF
-openai
-pandas
-openpyxl
