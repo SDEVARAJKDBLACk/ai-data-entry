@@ -2,12 +2,8 @@ fastapi
 uvicorn
 python-multipart
 pandas
-openpyxl
-numpy
 Pillow
-pytesseract
 pdfplumber
 python-docx
-opencv-python-headless
-spacy
-scikit-learn
+openpyxl
+pytesseract
