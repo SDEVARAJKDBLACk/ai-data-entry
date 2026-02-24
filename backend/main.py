@@ -1,15 +1,13 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import requests, pandas as pd, sqlite3, os, json
+import uvicorn, re, json, io
+import pandas as pd
 from datetime import datetime
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DB_FILE = "history.db"
-EXPORT_FILE = "export.xlsx"
+app = FastAPI()
 
-app = FastAPI(title="AI Data Entry Enterprise API")
-
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,174 +16,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= DB =================
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        raw_text TEXT,
-        structured_json TEXT,
-        created_at TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
+HISTORY = []
 
-init_db()
+# ---------- AI EXTRACTION ENGINE ----------
+def ai_extract(text: str):
+    data = {}
 
-def save_history(raw, structured):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO history (raw_text, structured_json, created_at) VALUES (?,?,?)",
-        (raw, json.dumps(structured), datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    names = re.findall(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)?\b", text)
+    phones = re.findall(r"\b[6-9]\d{9}\b", text)
+    emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+    ages = re.findall(r"\b(\d{1,3})\s*years?\s*old\b", text.lower())
+    amounts = re.findall(r"\b\d{3,}\b", text)
 
-# ================= AI =================
-def call_openai_structured(prompt: str):
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    gender = []
+    if re.search(r"\bmale\b", text.lower()):
+        gender.append("male")
+    if re.search(r"\bfemale\b", text.lower()):
+        gender.append("female")
 
-    schema_prompt = f"""
-Return ONLY valid JSON in this exact schema:
+    address = re.findall(r"\d{1,4},?\s*\w+\s*(street|st|road|rd|nagar|colony|layout)", text.lower())
+    city = re.findall(r"\b(chennai|madurai|coimbatore|trichy|salem|vellore|erode)\b", text.lower())
+    state = re.findall(r"\b(tamil nadu|kerala|karnataka|andhra pradesh)\b", text.lower())
+    country = re.findall(r"\b(india|usa|uk|canada)\b", text.lower())
 
-{{
-  "fields": [{{"field": "...", "value": "..."}}],
-  "core_fields": {{}},
-  "custom_fields": {{}}
-}}
-
-Rules:
-- Detect unlimited fields
-- Map values correctly
-- Auto-create missing fields
-- Core fields must include: name, phone, email, address, dob, gender, company, amount, date, id, account, city, state, country, zip, product, invoice, tax, total
-- JSON only, no text, no explanation
-
-DATA:
-{prompt}
-"""
-
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": "You are a structured data extraction engine."},
-            {"role": "user", "content": schema_prompt}
-        ]
-    }
-
-    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=60)
-    data = r.json()
-    return data["choices"][0]["message"]["content"]
-
-# ================= API =================
-
-@app.get("/")
-def root():
-    return {"status": "AI Data Entry Enterprise Backend Running"}
-
-@app.post("/analyze")
-async def analyze_data(payload: dict):
-    raw_text = payload.get("text", "")
-
-    ai_response = call_openai_structured(raw_text)
-
-    try:
-        structured = json.loads(ai_response)
-    except:
-        structured = {
-            "fields": [],
-            "core_fields": {},
-            "custom_fields": {},
-            "raw_ai_output": ai_response
-        }
-
-    save_history(raw_text, structured)
-
-    return {
-        "success": True,
-        "structured": structured
-    }
-
-@app.get("/history")
-def history():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, raw_text, structured_json, created_at FROM history ORDER BY id DESC")
-    rows = c.fetchall()
-    conn.close()
-
-    data = []
-    for r in rows:
-        data.append({
-            "id": r[0],
-            "raw_text": r[1],
-            "structured": json.loads(r[2]),
-            "created_at": r[3]
-        })
+    if names: data["Name"] = list(set(names))
+    if ages: data["Age"] = list(set(ages))
+    if gender: data["Gender"] = list(set(gender))
+    if phones: data["Phone"] = list(set(phones))
+    if emails: data["Email"] = list(set(emails))
+    if address: data["Address"] = list(set(address))
+    if city: data["City"] = list(set(city))
+    if state: data["State"] = list(set(state))
+    if country: data["Country"] = list(set(country))
+    if amounts: data["Amount"] = list(set(amounts))
 
     return data
 
+# ---------- API ----------
+@app.post("/analyze")
+async def analyze(text: str = Form(...)):
+    extracted = ai_extract(text)
+
+    record = {
+        "time": datetime.now().isoformat(),
+        "input": text,
+        "data": extracted
+    }
+
+    HISTORY.append(record)
+    if len(HISTORY) > 10:
+        HISTORY.pop(0)
+
+    return {"status": "success", "data": extracted}
+
+@app.get("/history")
+def get_history():
+    return HISTORY[::-1]
+
+@app.post("/custom-field")
+async def add_custom_field(field: str = Form(...), value: str = Form(...)):
+    if not HISTORY:
+        return {"status": "error", "msg": "No analysis found"}
+
+    if field in HISTORY[-1]["data"]:
+        HISTORY[-1]["data"][field].append(value)
+    else:
+        HISTORY[-1]["data"][field] = [value]
+
+    return {"status": "success", "data": HISTORY[-1]["data"]}
+
 @app.get("/export")
 def export_excel():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT structured_json FROM history")
-    rows = c.fetchall()
-    conn.close()
+    if not HISTORY:
+        return {"status": "error", "msg": "No data to export"}
 
-    records = []
+    latest = HISTORY[-1]["data"]
 
-    for r in rows:
-        js = json.loads(r[0])
+    rows = []
+    for k,v in latest.items():
+        rows.append({"Field": k, "Value": ", ".join(v)})
 
-        row = {}
-        for f in js.get("fields", []):
-            row[f["field"]] = f["value"]
+    df = pd.DataFrame(rows)
 
-        for k,v in js.get("core_fields", {}).items():
-            row[k] = v
+    file_path = "export.xlsx"
+    df.to_excel(file_path, index=False)
 
-        for k,v in js.get("custom_fields", {}).items():
-            row[k] = v
+    return FileResponse(file_path, filename="ai_data_export.xlsx")
 
-        records.append(row)
-
-    if not records:
-        df = pd.DataFrame([{"status": "no data"}])
-    else:
-        df = pd.DataFrame(records)
-
-    df.to_excel(EXPORT_FILE, index=False)
-    return FileResponse(EXPORT_FILE, filename="ai_data_entry_export.xlsx")
-
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    content = await file.read()
-    text = content.decode(errors="ignore")
-
-    ai_response = call_openai_structured(text)
-
-    try:
-        structured = json.loads(ai_response)
-    except:
-        structured = {
-            "fields": [],
-            "core_fields": {},
-            "custom_fields": {},
-            "raw_ai_output": ai_response
-        }
-
-    save_history(text, structured)
-
-    return {"success": True, "structured": structured}
-
-@app.post("/ocr")
-def cloud_ocr_stub():
-    return {"status": "OCR not enabled (cloud OCR phase next)"}
+# ---------- RUN ----------
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
