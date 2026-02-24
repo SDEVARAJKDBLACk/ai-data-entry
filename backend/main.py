@@ -1,26 +1,49 @@
-import os, re, io, json
+# backend/main.py
+import os, re, io, json, uuid
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, List
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 import pandas as pd
-from PIL import Image
-import pdfplumber
-from docx import Document
 
-# ================= OCR SAFE IMPORT =================
+# ---------- Optional Heavy Libs (Safe Import) ----------
+OCR_AVAILABLE = False
+PDF_AVAILABLE = False
+DOC_AVAILABLE = False
+NLP_AVAILABLE = False
+
 try:
     import pytesseract
+    from PIL import Image
     OCR_AVAILABLE = True
-except Exception as e:
-    OCR_AVAILABLE = False
-    print("OCR disabled:", e)
+except:
+    pass
 
-# ================= APP =================
-app = FastAPI(title="AI Data Entry Enterprise Engine", version="1.0")
+try:
+    import pdfplumber
+    PDF_AVAILABLE = True
+except:
+    pass
+
+try:
+    from docx import Document
+    DOC_AVAILABLE = True
+except:
+    pass
+
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    NLP_AVAILABLE = True
+except:
+    NLP_AVAILABLE = False
+    nlp = None
+
+# ---------- APP ----------
+app = FastAPI(title="AI Data Entry Engine", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,21 +52,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= STORAGE =================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMORY_PATH = os.path.join(BASE_DIR, "field_memory.json")
-HISTORY_PATH = os.path.join(BASE_DIR, "history.json")
-EXPORT_PATH = os.path.join(BASE_DIR, "export.xlsx")
+# ---------- STORAGE ----------
+HISTORY: List[Dict] = []
+MEMORY_PATH = "field_memory.json"
+EXPORT_FILE = "export.xlsx"
 
 if not os.path.exists(MEMORY_PATH):
     with open(MEMORY_PATH, "w") as f:
         json.dump({}, f)
 
-if not os.path.exists(HISTORY_PATH):
-    with open(HISTORY_PATH, "w") as f:
-        json.dump([], f)
-
-# ================= UTILS =================
 def load_memory():
     with open(MEMORY_PATH, "r") as f:
         return json.load(f)
@@ -52,210 +69,208 @@ def save_memory(mem):
     with open(MEMORY_PATH, "w") as f:
         json.dump(mem, f, indent=2)
 
-def load_history():
-    with open(HISTORY_PATH, "r") as f:
-        return json.load(f)
+# ---------- CORE AI ENGINE ----------
 
-def save_history(hist):
-    with open(HISTORY_PATH, "w") as f:
-        json.dump(hist, f, indent=2)
+FIELD_SCHEMA = {
+    "name": [],
+    "age": [],
+    "gender": [],
+    "phone": [],
+    "alternate_phone": [],
+    "email": [],
+    "address": [],
+    "city": [],
+    "state": [],
+    "country": [],
+    "pincode": [],
+    "company": [],
+    "job_title": [],
+    "salary": [],
+    "amount": [],
+    "product_name": [],
+    "price": [],
+    "quantity": [],
+    "date": [],
+}
 
-# ================= FILE EXTRACTION =================
-def extract_text_from_pdf(file_bytes):
-    text = ""
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for p in pdf.pages:
-            if p.extract_text():
-                text += p.extract_text() + "\n"
-    return text
+REGEX = {
+    "phone": r"\b\d{10}\b",
+    "email": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+    "pincode": r"\b\d{6}\b",
+    "amount": r"\b\d{3,}\b",
+    "date": r"\b\d{2}[/-]\d{2}[/-]\d{4}\b",
+}
 
-def extract_text_from_docx(file_bytes):
-    doc = Document(io.BytesIO(file_bytes))
-    return "\n".join([p.text for p in doc.paragraphs])
+JOB_WORDS = ["developer","engineer","analyst","manager","designer","consultant"]
+COMPANY_WORDS = ["ltd","limited","pvt","private","corp","company","technologies","infosys","tcs"]
+PRODUCT_WORDS = ["laptop","mobile","phone","computer","tv","tablet"]
 
-def extract_text_from_image(file_bytes):
-    if not OCR_AVAILABLE:
-        return ""
-    img = Image.open(io.BytesIO(file_bytes))
-    return pytesseract.image_to_string(img)
+def clean(text):
+    return text.replace("\n", " ").replace("\t", " ").strip().lower()
 
-# ================= OFFLINE NLP ENGINE =================
-def regex_extract(text: str) -> Dict[str, List[str]]:
-    extracted = {}
-    clean = text.strip()
+def unique_add(lst, val):
+    if val not in lst:
+        lst.append(val)
 
-    # -------- HUMAN NAME DETECTION --------
-    # captures full names like: Arun Kumar, Siva Kumar, Ashok Raj
-    name_pattern = r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b"
-    names = re.findall(name_pattern, clean)
-    if names:
-        extracted["name"] = list(set(names))
+def extract_regex(text, pattern):
+    return re.findall(pattern, text)
 
-    # -------- REFERENCE NAME --------
-    ref_pattern = r"(?:reference name is|referred by)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)"
-    refs = re.findall(ref_pattern, clean, re.IGNORECASE)
-    if refs:
-        extracted["reference_name"] = list(set(refs))
+def nlp_entities(text):
+    ents = []
+    if NLP_AVAILABLE:
+        doc = nlp(text)
+        for e in doc.ents:
+            ents.append((e.text.lower(), e.label_))
+    return ents
 
-    # -------- AGE --------
-    age_pattern = r"\b(\d{1,3})\s*(?:years old|yrs old|age)\b"
-    ages = re.findall(age_pattern, clean, re.IGNORECASE)
-    if ages:
-        extracted["age"] = list(set(ages))
+def smart_extract(text:str):
+    text_raw = text
+    text = clean(text)
 
-    # -------- GENDER --------
-    gender_pattern = r"\b(male|female|other)\b"
-    genders = re.findall(gender_pattern, clean, re.IGNORECASE)
-    if genders:
-        extracted["gender"] = list(set(genders))
+    data = {k:[] for k in FIELD_SCHEMA}
 
-    # -------- PHONE --------
-    phone_pattern = r"\b[6-9]\d{9}\b"
-    phones = re.findall(phone_pattern, clean)
-    if phones:
-        extracted["phone"] = list(set(phones))
+    # Regex extraction
+    phones = extract_regex(text, REGEX["phone"])
+    emails = extract_regex(text, REGEX["email"])
+    pincodes = extract_regex(text, REGEX["pincode"])
+    dates = extract_regex(text, REGEX["date"])
+    nums = extract_regex(text, REGEX["amount"])
 
-    # -------- EMAIL --------
-    email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-    emails = re.findall(email_pattern, clean)
-    if emails:
-        extracted["email"] = list(set(emails))
+    for p in phones: unique_add(data["phone"], p)
+    for e in emails: unique_add(data["email"], e)
+    for p in pincodes: unique_add(data["pincode"], p)
+    for d in dates: unique_add(data["date"], d)
 
-    # -------- AMOUNT / SALARY ONLY --------
-    amount_pattern = r"(?:rs\.?|₹|inr|salary|amount|pay)\s*[:\-]?\s*(\d{3,7})"
-    amounts = re.findall(amount_pattern, clean, re.IGNORECASE)
-    if amounts:
-        extracted["amount"] = list(set(amounts))
+    # NLP extraction
+    ents = nlp_entities(text_raw)
 
-    # -------- CITY --------
-    city_pattern = r"\b(chennai|bangalore|mumbai|delhi|hyderabad|coimbatore|madurai)\b"
-    cities = re.findall(city_pattern, clean, re.IGNORECASE)
-    if cities:
-        extracted["city"] = list(set(cities))
+    for val,label in ents:
+        if label == "PERSON":
+            unique_add(data["name"], val)
+        elif label == "GPE":
+            unique_add(data["city"], val)
+        elif label == "ORG":
+            unique_add(data["company"], val)
+        elif label == "DATE":
+            unique_add(data["date"], val)
+        elif label == "MONEY":
+            unique_add(data["amount"], re.sub(r"[^\d]","",val))
 
-    # -------- STATE --------
-    state_pattern = r"\b(tamil nadu|kerala|karnataka|maharashtra|andhra pradesh)\b"
-    states = re.findall(state_pattern, clean, re.IGNORECASE)
-    if states:
-        extracted["state"] = list(set(states))
+    # Heuristic extraction
+    for word in JOB_WORDS:
+        if word in text:
+            unique_add(data["job_title"], word)
 
-    # -------- COUNTRY --------
-    country_pattern = r"\b(india|usa|uk|canada|australia)\b"
-    countries = re.findall(country_pattern, clean, re.IGNORECASE)
-    if countries:
-        extracted["country"] = list(set(countries))
+    for word in PRODUCT_WORDS:
+        if word in text:
+            unique_add(data["product_name"], word)
 
-    # -------- ADDRESS --------
-    address_pattern = r"\b\d{1,4},\s*[\w\s,.-]+(?:street|road|nagar|colony|layout)\b"
-    addresses = re.findall(address_pattern, clean, re.IGNORECASE)
-    if addresses:
-        extracted["address"] = list(set(addresses))
+    for word in COMPANY_WORDS:
+        for t in text.split():
+            if word in t:
+                unique_add(data["company"], t)
 
-    return extracted
-# ================= AI FIELD ENGINE =================
-def ai_field_engine(text: str) -> Dict[str, Any]:
+    # Age & Gender
+    for n in nums:
+        if 1 <= int(n) <= 120:
+            unique_add(data["age"], n)
+        elif int(n) > 1000:
+            unique_add(data["amount"], n)
+
+    if "male" in text: unique_add(data["gender"], "male")
+    if "female" in text: unique_add(data["gender"], "female")
+
+    # Salary logic
+    if "salary" in text:
+        for n in nums:
+            if int(n) > 1000:
+                unique_add(data["salary"], n)
+
+    # Memory learning
     memory = load_memory()
-    extracted = regex_extract(text)
-
-    # ---------- MEMORY LEARNING ----------
-    for field, values in extracted.items():
-        if field not in memory:
-            memory[field] = []
-        for v in values:
-            if v not in memory[field]:
-                memory[field].append(v)
-
+    for k,v in data.items():
+        if v:
+            memory[k] = list(set(memory.get(k, []) + v))
     save_memory(memory)
 
-    # ---------- STRUCTURED MAPPING ----------
-    structured = {}
-    for k, v in extracted.items():
-        structured[k.replace("_", " ").title()] = ", ".join(v)
+    return data
 
-    return structured
+# ---------- FILE PARSERS ----------
 
-# ================= API =================
-
-@app.post("/analyze")
-async def analyze(
-    text: str = Form(None),
-    file: UploadFile = File(None),
-    payload: dict = None
-):
+def parse_file(file:UploadFile):
+    ext = file.filename.split(".")[-1].lower()
     content = ""
 
-    # JSON support (desktop browsers)
-    if payload and "text" in payload:
-        content = payload["text"]
+    if ext in ["txt"]:
+        content = file.file.read().decode()
 
-    if file:
-        data = await file.read()
-        fname = file.filename.lower()
+    elif ext in ["pdf"] and PDF_AVAILABLE:
+        with pdfplumber.open(file.file) as pdf:
+            for page in pdf.pages:
+                content += page.extract_text() + "\n"
 
-        if fname.endswith(".pdf"):
-            content += extract_text_from_pdf(data)
-        elif fname.endswith(".docx"):
-            content += extract_text_from_docx(data)
-        elif fname.endswith((".png", ".jpg", ".jpeg")):
-            content += extract_text_from_image(data)
-        else:
-            content += data.decode(errors="ignore")
+    elif ext in ["docx"] and DOC_AVAILABLE:
+        doc = Document(file.file)
+        for p in doc.paragraphs:
+            content += p.text + "\n"
 
-    if text:
-        content += "\n" + text
+    elif ext in ["png","jpg","jpeg"] and OCR_AVAILABLE:
+        img = Image.open(file.file)
+        content = pytesseract.image_to_string(img)
 
-    if not content.strip():
-        return JSONResponse({"error": "No input data"}, status_code=400)
+    return content
 
-    fields = ai_field_engine(content)
+# ---------- API ----------
 
-    history = load_history()
-    history.append({
-        "time": datetime.now().isoformat(),
-        "input": content[:300],
-        "fields": fields
-    })
-    save_history(history[-50:])
+@app.get("/health")
+def health():
+    return {"status":"ok","ocr":OCR_AVAILABLE,"nlp":NLP_AVAILABLE}
 
-    return {
-        "status": "success",
-        "fields": fields
-        }
+@app.post("/analyze")
+def analyze(text: str = Form(...)):
+    result = smart_extract(text)
+    record = {
+        "id": str(uuid.uuid4()),
+        "time": datetime.utcnow().isoformat(),
+        "data": result
+    }
+    HISTORY.append(record)
+    return result
 
-@app.get("/history")
-def get_history():
-    return load_history()[-10:]
+@app.post("/upload")
+def upload(file: UploadFile = File(...)):
+    text = parse_file(file)
+    result = smart_extract(text)
+    record = {
+        "id": str(uuid.uuid4()),
+        "time": datetime.utcnow().isoformat(),
+        "data": result
+    }
+    HISTORY.append(record)
+    return result
 
 @app.post("/custom-field")
-def add_custom_field(field: str = Form(...), value: str = Form(...)):
-    memory = load_memory()
-    if field not in memory:
-        memory[field] = []
-    memory[field].append(value)
-    save_memory(memory)
-    return {"status": "added"}
+def custom_field(field:str = Form(...), value:str = Form(...)):
+    if not HISTORY:
+        return {"error":"No analysis data"}
+    HISTORY[-1]["data"].setdefault(field.lower(), [])
+    unique_add(HISTORY[-1]["data"][field.lower()], value.lower())
+    return HISTORY[-1]["data"]
+
+@app.get("/history")
+def history():
+    return HISTORY[-10:]
 
 @app.get("/export")
 def export_excel():
-    history = load_history()
+    if not HISTORY:
+        return {"error":"No data"}
     rows = []
-
-    for h in history:
-        for k, v in h["fields"].items():
-            rows.append({
-                "time": h["time"],
-                "field": k,
-                "value": v
-            })
-
-    if not rows:
-        return JSONResponse({"error": "No data"}, status_code=400)
-
+    for rec in HISTORY:
+        row = {}
+        for k,v in rec["data"].items():
+            row[k] = ", ".join(v)
+        rows.append(row)
     df = pd.DataFrame(rows)
-    df.to_excel(EXPORT_PATH, index=False)
-
-    return FileResponse(EXPORT_PATH, filename="ai_data_export.xlsx")
-
-@app.get("/")
-def root():
-    return {"status": "AI Data Entry Enterprise Engine Running"}
+    df.to_excel(EXPORT_FILE, index=False)
+    return FileResponse(EXPORT_FILE)
