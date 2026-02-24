@@ -1,8 +1,12 @@
 fastapi
 uvicorn
-requests
-python-multipart
 pandas
 openpyxl
-pdfplumber
+python-multipart
+pytesseract
 Pillow
+pdfplumber
+python-docx
+spacy
+scikit-learn
+joblib
