@@ -81,30 +81,77 @@ def extract_text_from_image(file_bytes):
 
 # ================= OFFLINE NLP ENGINE =================
 def regex_extract(text: str) -> Dict[str, List[str]]:
-    patterns = {
-        "name": r"(?:my name is|i am|name is)\s+([A-Z][a-z]+)",
-        "reference_name": r"(?:reference name is)\s+([A-Z][a-z]+\s[A-Z][a-z]+)",
-        "age": r"(\d{1,3})\s*(?:years old|yrs old|age)",
-        "gender": r"\b(male|female|other)\b",
-        "phone": r"\b\d{10}\b",
-        "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-        "amount": r"\b\d{3,}\b",
-        "city": r"\b(chennai|bangalore|mumbai|delhi|hyderabad)\b",
-        "state": r"\b(tamil nadu|kerala|karnataka|maharashtra)\b",
-        "country": r"\b(india|usa|uk|canada)\b",
-        "address": r"\b\d{1,4},\s.*?(street|road|nagar)\b"
-    }
-
     extracted = {}
-    lower = text.lower()
+    clean = text.strip()
 
-    for field, pattern in patterns.items():
-        matches = re.findall(pattern, lower, re.IGNORECASE)
-        if matches:
-            extracted[field] = list(set(matches))
+    # -------- HUMAN NAME DETECTION --------
+    # captures full names like: Arun Kumar, Siva Kumar, Ashok Raj
+    name_pattern = r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b"
+    names = re.findall(name_pattern, clean)
+    if names:
+        extracted["name"] = list(set(names))
+
+    # -------- REFERENCE NAME --------
+    ref_pattern = r"(?:reference name is|referred by)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)"
+    refs = re.findall(ref_pattern, clean, re.IGNORECASE)
+    if refs:
+        extracted["reference_name"] = list(set(refs))
+
+    # -------- AGE --------
+    age_pattern = r"\b(\d{1,3})\s*(?:years old|yrs old|age)\b"
+    ages = re.findall(age_pattern, clean, re.IGNORECASE)
+    if ages:
+        extracted["age"] = list(set(ages))
+
+    # -------- GENDER --------
+    gender_pattern = r"\b(male|female|other)\b"
+    genders = re.findall(gender_pattern, clean, re.IGNORECASE)
+    if genders:
+        extracted["gender"] = list(set(genders))
+
+    # -------- PHONE --------
+    phone_pattern = r"\b[6-9]\d{9}\b"
+    phones = re.findall(phone_pattern, clean)
+    if phones:
+        extracted["phone"] = list(set(phones))
+
+    # -------- EMAIL --------
+    email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+    emails = re.findall(email_pattern, clean)
+    if emails:
+        extracted["email"] = list(set(emails))
+
+    # -------- AMOUNT / SALARY ONLY --------
+    amount_pattern = r"(?:rs\.?|₹|inr|salary|amount|pay)\s*[:\-]?\s*(\d{3,7})"
+    amounts = re.findall(amount_pattern, clean, re.IGNORECASE)
+    if amounts:
+        extracted["amount"] = list(set(amounts))
+
+    # -------- CITY --------
+    city_pattern = r"\b(chennai|bangalore|mumbai|delhi|hyderabad|coimbatore|madurai)\b"
+    cities = re.findall(city_pattern, clean, re.IGNORECASE)
+    if cities:
+        extracted["city"] = list(set(cities))
+
+    # -------- STATE --------
+    state_pattern = r"\b(tamil nadu|kerala|karnataka|maharashtra|andhra pradesh)\b"
+    states = re.findall(state_pattern, clean, re.IGNORECASE)
+    if states:
+        extracted["state"] = list(set(states))
+
+    # -------- COUNTRY --------
+    country_pattern = r"\b(india|usa|uk|canada|australia)\b"
+    countries = re.findall(country_pattern, clean, re.IGNORECASE)
+    if countries:
+        extracted["country"] = list(set(countries))
+
+    # -------- ADDRESS --------
+    address_pattern = r"\b\d{1,4},\s*[\w\s,.-]+(?:street|road|nagar|colony|layout)\b"
+    addresses = re.findall(address_pattern, clean, re.IGNORECASE)
+    if addresses:
+        extracted["address"] = list(set(addresses))
 
     return extracted
-
 # ================= AI FIELD ENGINE =================
 def ai_field_engine(text: str) -> Dict[str, Any]:
     memory = load_memory()
@@ -132,22 +179,27 @@ def ai_field_engine(text: str) -> Dict[str, Any]:
 @app.post("/analyze")
 async def analyze(
     text: str = Form(None),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    payload: dict = None
 ):
     content = ""
+
+    # JSON support (desktop browsers)
+    if payload and "text" in payload:
+        content = payload["text"]
 
     if file:
         data = await file.read()
         fname = file.filename.lower()
 
         if fname.endswith(".pdf"):
-            content = extract_text_from_pdf(data)
+            content += extract_text_from_pdf(data)
         elif fname.endswith(".docx"):
-            content = extract_text_from_docx(data)
+            content += extract_text_from_docx(data)
         elif fname.endswith((".png", ".jpg", ".jpeg")):
-            content = extract_text_from_image(data)
+            content += extract_text_from_image(data)
         else:
-            content = data.decode(errors="ignore")
+            content += data.decode(errors="ignore")
 
     if text:
         content += "\n" + text
@@ -163,12 +215,12 @@ async def analyze(
         "input": content[:300],
         "fields": fields
     })
-    save_history(history[-50:])  # last 50 only
+    save_history(history[-50:])
 
     return {
         "status": "success",
         "fields": fields
-    }
+        }
 
 @app.get("/history")
 def get_history():
