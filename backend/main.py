@@ -1,276 +1,211 @@
-# backend/main.py
-import os, re, io, json, uuid
+from fastapi import FastAPI, UploadFile, File, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import re, io, json, os
 from datetime import datetime
 from typing import Dict, List
-
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-
 import pandas as pd
 
-# ---------- Optional Heavy Libs (Safe Import) ----------
-OCR_AVAILABLE = False
-PDF_AVAILABLE = False
-DOC_AVAILABLE = False
-NLP_AVAILABLE = False
+app = FastAPI()
 
-try:
-    import pytesseract
-    from PIL import Image
-    OCR_AVAILABLE = True
-except:
-    pass
+# -------------------- STORAGE --------------------
+HISTORY = []
+LEARNING_DB = {}
+CUSTOM_FIELDS = []
 
-try:
-    import pdfplumber
-    PDF_AVAILABLE = True
-except:
-    pass
+# -------------------- NLP / AI ENGINE --------------------
+def extract_fields(text: str):
+    fields = {}
 
-try:
-    from docx import Document
-    DOC_AVAILABLE = True
-except:
-    pass
+    # --- Name extraction (human names only) ---
+    name_pattern = r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b"
+    names = re.findall(name_pattern, text)
+    if names:
+        fields["name"] = list(set(names))
 
-try:
-    import spacy
-    nlp = spacy.load("en_core_web_sm")
-    NLP_AVAILABLE = True
-except:
-    NLP_AVAILABLE = False
-    nlp = None
+    # --- Amount extraction ---
+    amount_pattern = r"(₹\s?\d+(?:,\d+)*(?:\.\d+)?|\$\s?\d+(?:,\d+)*(?:\.\d+)?|\d+(?:,\d+)*(?:\.\d+)?\s?(?:INR|USD|rupees|rs|salary|amount))"
+    amounts = re.findall(amount_pattern, text, re.IGNORECASE)
+    if amounts:
+        fields["amount"] = list(set(amounts))
 
-# ---------- APP ----------
-app = FastAPI(title="AI Data Entry Engine", version="1.0")
+    # --- Email ---
+    emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+    if emails:
+        fields["email"] = list(set(emails))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # --- Phone ---
+    phones = re.findall(r"\b\d{10}\b", text)
+    if phones:
+        fields["phone"] = list(set(phones))
 
-# ---------- STORAGE ----------
-HISTORY: List[Dict] = []
-MEMORY_PATH = "field_memory.json"
-EXPORT_FILE = "export.xlsx"
+    # --- Dates ---
+    dates = re.findall(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text)
+    if dates:
+        fields["date"] = list(set(dates))
 
-if not os.path.exists(MEMORY_PATH):
-    with open(MEMORY_PATH, "w") as f:
-        json.dump({}, f)
+    # --- Generic key:value detection ---
+    kv_pattern = r"([A-Za-z ]+)\s*[:\-]\s*([A-Za-z0-9 ₹$.,/-]+)"
+    kvs = re.findall(kv_pattern, text)
+    for k,v in kvs:
+        k = k.strip().lower()
+        if k not in fields:
+            fields[k] = v.strip()
 
-def load_memory():
-    with open(MEMORY_PATH, "r") as f:
-        return json.load(f)
+    return fields
 
-def save_memory(mem):
-    with open(MEMORY_PATH, "w") as f:
-        json.dump(mem, f, indent=2)
+# -------------------- LEARNING ENGINE --------------------
+def learn_fields(fields: Dict):
+    for k,v in fields.items():
+        if k not in LEARNING_DB:
+            LEARNING_DB[k] = []
+        LEARNING_DB[k].append(v)
 
-# ---------- CORE AI ENGINE ----------
+# -------------------- FRONTEND UI --------------------
+HTML_UI = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>AI Data Entry Enterprise</title>
+<style>
+body{font-family:Arial;background:#f4f6fb;margin:0;padding:0}
+.header{background:#1e293b;color:white;padding:15px;text-align:center;font-size:22px}
+.container{padding:20px}
+.card{background:white;padding:20px;border-radius:10px;box-shadow:0 0 10px #ddd;margin-bottom:20px}
+button{padding:10px 15px;border:none;background:#2563eb;color:white;border-radius:6px;cursor:pointer}
+input,textarea{width:100%;padding:10px;margin:8px 0;border:1px solid #ccc;border-radius:6px}
+table{width:100%;border-collapse:collapse;margin-top:15px}
+th,td{border:1px solid #ddd;padding:8px;text-align:left}
+th{background:#f1f5f9}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+</style>
+</head>
+<body>
 
-FIELD_SCHEMA = {
-    "name": [],
-    "age": [],
-    "gender": [],
-    "phone": [],
-    "alternate_phone": [],
-    "email": [],
-    "address": [],
-    "city": [],
-    "state": [],
-    "country": [],
-    "pincode": [],
-    "company": [],
-    "job_title": [],
-    "salary": [],
-    "amount": [],
-    "product_name": [],
-    "price": [],
-    "quantity": [],
-    "date": [],
+<div class="header">AI DATA ENTRY ENTERPRISE PLATFORM</div>
+
+<div class="container">
+
+<div class="card">
+<h3>Upload File</h3>
+<input type="file" id="file"/>
+<button onclick="upload()">Upload & Analyze</button>
+</div>
+
+<div class="card">
+<h3>Text Input</h3>
+<textarea id="text" rows="6"></textarea>
+<button onclick="analyzeText()">Analyze Text</button>
+</div>
+
+<div class="card">
+<h3>Custom Field</h3>
+<div class="grid">
+<input id="cf_name" placeholder="Field Name"/>
+<input id="cf_value" placeholder="Field Value"/>
+</div>
+<button onclick="addField()">Add Field</button>
+</div>
+
+<div class="card">
+<h3>Extracted Data</h3>
+<table id="table">
+<tr><th>Field</th><th>Value</th></tr>
+</table>
+<button onclick="exportExcel()">Export Excel</button>
+</div>
+
+</div>
+
+<script>
+function render(data){
+ let t=document.getElementById("table");
+ t.innerHTML="<tr><th>Field</th><th>Value</th></tr>";
+ for(let k in data){
+   let v=data[k];
+   if(Array.isArray(v)) v=v.join(", ");
+   t.innerHTML+=`<tr><td>${k}</td><td>${v}</td></tr>`;
+ }
 }
 
-REGEX = {
-    "phone": r"\b\d{10}\b",
-    "email": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-    "pincode": r"\b\d{6}\b",
-    "amount": r"\b\d{3,}\b",
-    "date": r"\b\d{2}[/-]\d{2}[/-]\d{4}\b",
+async function analyzeText(){
+ let text=document.getElementById("text").value;
+ let res=await fetch('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+ let data=await res.json();
+ render(data.fields);
 }
 
-JOB_WORDS = ["developer","engineer","analyst","manager","designer","consultant"]
-COMPANY_WORDS = ["ltd","limited","pvt","private","corp","company","technologies","infosys","tcs"]
-PRODUCT_WORDS = ["laptop","mobile","phone","computer","tv","tablet"]
+async function upload(){
+ let f=document.getElementById("file").files[0];
+ let fd=new FormData();
+ fd.append("file",f);
+ let res=await fetch('/upload',{method:'POST',body:fd});
+ let data=await res.json();
+ render(data.fields);
+}
 
-def clean(text):
-    return text.replace("\n", " ").replace("\t", " ").strip().lower()
+async function addField(){
+ let name=document.getElementById("cf_name").value;
+ let value=document.getElementById("cf_value").value;
+ let res=await fetch('/custom',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,value})});
+ let data=await res.json();
+ render(data.fields);
+}
 
-def unique_add(lst, val):
-    if val not in lst:
-        lst.append(val)
+async function exportExcel(){
+ window.location='/export';
+}
+</script>
 
-def extract_regex(text, pattern):
-    return re.findall(pattern, text)
+</body>
+</html>
+"""
 
-def nlp_entities(text):
-    ents = []
-    if NLP_AVAILABLE:
-        doc = nlp(text)
-        for e in doc.ents:
-            ents.append((e.text.lower(), e.label_))
-    return ents
-
-def smart_extract(text:str):
-    text_raw = text
-    text = clean(text)
-
-    data = {k:[] for k in FIELD_SCHEMA}
-
-    # Regex extraction
-    phones = extract_regex(text, REGEX["phone"])
-    emails = extract_regex(text, REGEX["email"])
-    pincodes = extract_regex(text, REGEX["pincode"])
-    dates = extract_regex(text, REGEX["date"])
-    nums = extract_regex(text, REGEX["amount"])
-
-    for p in phones: unique_add(data["phone"], p)
-    for e in emails: unique_add(data["email"], e)
-    for p in pincodes: unique_add(data["pincode"], p)
-    for d in dates: unique_add(data["date"], d)
-
-    # NLP extraction
-    ents = nlp_entities(text_raw)
-
-    for val,label in ents:
-        if label == "PERSON":
-            unique_add(data["name"], val)
-        elif label == "GPE":
-            unique_add(data["city"], val)
-        elif label == "ORG":
-            unique_add(data["company"], val)
-        elif label == "DATE":
-            unique_add(data["date"], val)
-        elif label == "MONEY":
-            unique_add(data["amount"], re.sub(r"[^\d]","",val))
-
-    # Heuristic extraction
-    for word in JOB_WORDS:
-        if word in text:
-            unique_add(data["job_title"], word)
-
-    for word in PRODUCT_WORDS:
-        if word in text:
-            unique_add(data["product_name"], word)
-
-    for word in COMPANY_WORDS:
-        for t in text.split():
-            if word in t:
-                unique_add(data["company"], t)
-
-    # Age & Gender
-    for n in nums:
-        if 1 <= int(n) <= 120:
-            unique_add(data["age"], n)
-        elif int(n) > 1000:
-            unique_add(data["amount"], n)
-
-    if "male" in text: unique_add(data["gender"], "male")
-    if "female" in text: unique_add(data["gender"], "female")
-
-    # Salary logic
-    if "salary" in text:
-        for n in nums:
-            if int(n) > 1000:
-                unique_add(data["salary"], n)
-
-    # Memory learning
-    memory = load_memory()
-    for k,v in data.items():
-        if v:
-            memory[k] = list(set(memory.get(k, []) + v))
-    save_memory(memory)
-
-    return data
-
-# ---------- FILE PARSERS ----------
-
-def parse_file(file:UploadFile):
-    ext = file.filename.split(".")[-1].lower()
-    content = ""
-
-    if ext in ["txt"]:
-        content = file.file.read().decode()
-
-    elif ext in ["pdf"] and PDF_AVAILABLE:
-        with pdfplumber.open(file.file) as pdf:
-            for page in pdf.pages:
-                content += page.extract_text() + "\n"
-
-    elif ext in ["docx"] and DOC_AVAILABLE:
-        doc = Document(file.file)
-        for p in doc.paragraphs:
-            content += p.text + "\n"
-
-    elif ext in ["png","jpg","jpeg"] and OCR_AVAILABLE:
-        img = Image.open(file.file)
-        content = pytesseract.image_to_string(img)
-
-    return content
-
-# ---------- API ----------
-
-@app.get("/health")
-def health():
-    return {"status":"ok","ocr":OCR_AVAILABLE,"nlp":NLP_AVAILABLE}
+# -------------------- ROUTES --------------------
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return HTML_UI
 
 @app.post("/analyze")
-def analyze(text: str = Form(...)):
-    result = smart_extract(text)
-    record = {
-        "id": str(uuid.uuid4()),
-        "time": datetime.utcnow().isoformat(),
-        "data": result
-    }
-    HISTORY.append(record)
-    return result
+async def analyze(data: dict):
+    text = data.get("text","")
+    fields = extract_fields(text)
+    learn_fields(fields)
+    HISTORY.append({"time":str(datetime.now()),"fields":fields})
+    return {"fields":fields}
 
 @app.post("/upload")
-def upload(file: UploadFile = File(...)):
-    text = parse_file(file)
-    result = smart_extract(text)
-    record = {
-        "id": str(uuid.uuid4()),
-        "time": datetime.utcnow().isoformat(),
-        "data": result
-    }
-    HISTORY.append(record)
-    return result
+async def upload(file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        text = content.decode(errors="ignore")
+    except:
+        text = str(content)
+    fields = extract_fields(text)
+    learn_fields(fields)
+    HISTORY.append({"time":str(datetime.now()),"fields":fields})
+    return {"fields":fields}
 
-@app.post("/custom-field")
-def custom_field(field:str = Form(...), value:str = Form(...)):
-    if not HISTORY:
-        return {"error":"No analysis data"}
-    HISTORY[-1]["data"].setdefault(field.lower(), [])
-    unique_add(HISTORY[-1]["data"][field.lower()], value.lower())
-    return HISTORY[-1]["data"]
-
-@app.get("/history")
-def history():
-    return HISTORY[-10:]
+@app.post("/custom")
+async def custom(data: dict):
+    name = data["name"]
+    value = data["value"]
+    CUSTOM_FIELDS.append({name:value})
+    merged = {}
+    for h in HISTORY[-1:]:
+        merged.update(h["fields"])
+    merged[name]=value
+    return {"fields":merged}
 
 @app.get("/export")
-def export_excel():
+def export():
     if not HISTORY:
-        return {"error":"No data"}
-    rows = []
-    for rec in HISTORY:
-        row = {}
-        for k,v in rec["data"].items():
-            row[k] = ", ".join(v)
-        rows.append(row)
-    df = pd.DataFrame(rows)
-    df.to_excel(EXPORT_FILE, index=False)
-    return FileResponse(EXPORT_FILE)
+        return JSONResponse({"error":"No data"})
+    rows=[]
+    for h in HISTORY:
+        rows.append(h["fields"])
+    df=pd.DataFrame(rows)
+    stream=io.BytesIO()
+    df.to_excel(stream,index=False)
+    stream.seek(0)
+    return StreamingResponse(stream,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":"attachment; filename=ai_data_entry.xlsx"})
