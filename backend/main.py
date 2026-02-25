@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form
+  from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from pydantic import BaseModel
 import uvicorn, io, re, json, os, pandas as pd
 from PIL import Image
 import pytesseract, pdfplumber, docx
@@ -9,193 +10,256 @@ from typing import List, Dict
 app = FastAPI()
 
 # ---------------------------
-# STORAGE (Memory & History)
+# DB & AUTH SIMULATION
 # ---------------------------
+USERS_FILE = "users.json"
 HISTORY_FILE = "analysis_history.json"
 
-def get_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r") as f: return json.load(f)
-    return []
+def load_json(filename):
+    if os.path.exists(filename):
+        with open(filename, "r") as f: return json.load(f)
+    return [] if "history" in filename else {}
 
-def save_to_history(data):
-    history = get_history()
-    data['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    history.insert(0, data) # Put new one at top
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(history[:10], f, indent=4) # Keep last 10
+def save_json(filename, data):
+    with open(filename, "w") as f: json.dump(data, f, indent=4)
 
 # ---------------------------
-# AI EXTRACTION LOGIC (Improved)
+# EXTRACTION LOGIC
 # ---------------------------
 def ai_extract(text):
-    text_clean = text.replace('\n', ' ')
-    result = {
-        "Name": ", ".join(re.findall(r'\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*', text)) or "N/A",
-        "Age": re.search(r'(\d{1,3})\s*(?:years|age)', text, re.I).group(1) if re.search(r'(\d{1,3})\s*(?:years|age)', text, re.I) else "N/A",
-        "Gender": "Male" if "male" in text.lower() else ("Female" if "female" in text.lower() else "N/A"),
-        "Phone": ", ".join(re.findall(r'\b\d{10}\b', text)) or "N/A",
-        "Email": ", ".join(re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', text)) or "N/A",
-        "City": re.search(r'City\s*([A-Za-z]+)', text, re.I).group(1) if re.search(r'City\s*([A-Za-z]+)', text, re.I) else "N/A",
-        "Salary": ", ".join(re.findall(r'(?:salary|paid)\s*(?:is|amount)?\s*(\d+)', text, re.I)) or "N/A",
-        "Date": ", ".join(re.findall(r'\b\d{2}/\d{2}/\d{4}\b', text)) or "N/A"
+    def find_all(pattern, txt):
+        matches = re.findall(pattern, txt, re.IGNORECASE | re.MULTILINE)
+        return ", ".join(list(dict.fromkeys([m.strip() for m in matches if m.strip()]))) or "N/A"
+
+    raw_names = re.findall(r'\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)+\b', text)
+    stop_words = ["Road", "Street", "City", "State", "Country", "Pincode", "Technologies", "Company", "Office", "Laptop", "Mobile"]
+    filtered_names = [n for n in raw_names if not any(sw in n for sw in stop_words) and "Reference" not in n]
+    
+    return {
+        "Name": ", ".join(list(dict.fromkeys(filtered_names))) or "N/A",
+        "Reference Name": find_all(r'Reference name is ([\w\s]+)\.', text),
+        "Age": find_all(r'(\d{1,3})\s*(?:years|age)', text),
+        "Gender": find_all(r'\b(male|female)\b', text),
+        "Phone": find_all(r'\b\d{10}\b', text),
+        "Email": find_all(r'[\w\.-]+@[\w\.-]+\.\w+', text),
+        "City": find_all(r'City\s*(?:is)?\s*([A-Za-z\s]+)', text),
+        "Job Title": find_all(r'(?:designation|as)\s*(?:is)?\s*([A-Za-z\s]+?)(?=\.\n|Arun|My)', text),
+        "Salary": find_all(r'salary\s*(?:is)?\s*(\d+)', text),
+        "Transaction Number": find_all(r'TXN\d+', text),
     }
-    return result
+
+# ---------------------------
+# ROUTES
+# ---------------------------
+@app.post("/register")
+async def register(data: dict):
+    users = load_json(USERS_FILE)
+    if data['email'] in users: raise HTTPException(status_code=400, detail="User exists")
+    users[data['email']] = data
+    save_json(USERS_FILE, users)
+    return {"status": "success"}
+
+@app.post("/login")
+async def login(data: dict):
+    users = load_json(USERS_FILE)
+    user = users.get(data['email'])
+    if user and user['password'] == data['password']:
+        return {"status": "success", "user": user}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = None, text: str = Form(default="")):
     content = text
     if file:
         data = await file.read()
-        fname = file.filename.lower()
-        if fname.endswith((".png", ".jpg", ".jpeg")):
-            img = Image.open(io.BytesIO(data))
-            content += "\n" + pytesseract.image_to_string(img)
-        elif fname.endswith(".pdf"):
+        if file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            content += "\n" + pytesseract.image_to_string(Image.open(io.BytesIO(data)))
+        elif file.filename.lower().endswith(".pdf"):
             with pdfplumber.open(io.BytesIO(data)) as pdf:
                 content += "\n" + "".join([p.extract_text() for p in pdf.pages])
     
     extracted = ai_extract(content)
-    save_to_history(extracted)
+    history = load_json(HISTORY_FILE)
+    extracted['timestamp'] = datetime.now().strftime("%H:%M:%S")
+    history.insert(0, extracted)
+    save_json(HISTORY_FILE, history[:10])
     return extracted
-
-@app.get("/history")
-async def fetch_history():
-    return get_history()
 
 @app.post("/export")
 async def export(data: List[Dict]):
     df = pd.DataFrame(data)
-    file_path = "extracted_data.xlsx"
-    df.to_excel(file_path, index=False)
-    return FileResponse(file_path, filename="Data_Export.xlsx")
+    df.to_excel("Export.xlsx", index=False)
+    return FileResponse("Export.xlsx")
 
-# ---------------------------
-# MODERN DARK UI (Tailwind)
-# ---------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Data Entry - Dark Worker</title>
+    <title>AI Data Entry - Auth</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background-color: #0f172a; color: #e2e8f0; }
-        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid #334155; }
-        input, textarea { background: #1e293b !important; color: white !important; border: 1px solid #334155 !important; }
+        body { background: #0f172a; color: white; font-family: sans-serif; }
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .hidden { display: none; }
     </style>
 </head>
-<body class="p-4 md:p-8">
-    <div class="max-w-4xl mx-auto space-y-6">
-        <h1 class="text-2xl font-bold text-blue-400">AI Data Entry – Automated Data Worker</h1>
-        
-        <div class="glass p-6 rounded-xl shadow-2xl">
-            <p class="mb-2 text-sm text-gray-400">📂 Upload text / notes / PDF / Image</p>
-            <input type="file" id="fileInput" class="mb-4 block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700">
-            <textarea id="textInput" rows="6" class="w-full p-3 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Enter or paste input..."></textarea>
-            
-            <div class="mt-4 flex gap-3">
-                <button onclick="doAnalyze()" class="bg-cyan-600 hover:bg-cyan-500 px-6 py-2 rounded-md font-medium transition">Analyze</button>
-                <button onclick="clearAll()" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-md font-medium transition">Clear</button>
-                <button onclick="exportToExcel()" class="bg-indigo-600 hover:bg-indigo-500 px-6 py-2 rounded-md font-medium transition">Export Excel</button>
+<body class="p-4">
+    <div id="authSection" class="max-w-md mx-auto mt-20 bg-slate-800 p-8 rounded-xl shadow-lg">
+        <h2 id="authTitle" class="text-2xl font-bold mb-6 text-blue-400 text-center">Login</h2>
+        <input type="email" id="authEmail" placeholder="Email" class="w-full mb-4 p-3 rounded bg-slate-900 border border-slate-700">
+        <input type="password" id="authPass" placeholder="Password" class="w-full mb-6 p-3 rounded bg-slate-900 border border-slate-700">
+        <button onclick="handleAuth()" id="authBtn" class="w-full bg-blue-600 py-3 rounded font-bold hover:bg-blue-500">Sign In</button>
+        <p class="mt-4 text-sm text-center cursor-pointer text-gray-400" onclick="toggleAuthMode()">New user? Register here</p>
+    </div>
+
+    <div id="mainApp" class="max-w-5xl mx-auto hidden">
+        <div class="flex justify-between items-center mb-8 bg-slate-800 p-4 rounded-lg">
+            <div>
+                <span class="text-blue-400 font-bold">👤 User:</span> <span id="userNameDisplay">User</span>
             </div>
+            <button onclick="logout()" class="bg-red-600 px-4 py-1 rounded text-sm">Logout</button>
         </div>
 
-        <div class="glass p-6 rounded-xl overflow-hidden">
-            <h2 class="text-lg font-semibold mb-4 border-b border-gray-700 pb-2">Extracted Data:</h2>
-            <table class="w-full text-left">
-                <thead><tr class="text-gray-400 border-b border-gray-800"><th class="py-2">Field</th><th>Values</th></tr></thead>
-                <tbody id="dataTable">
-                    </tbody>
-            </table>
-
-            <div class="mt-8 border-t border-gray-800 pt-4">
-                <h3 class="text-sm font-bold text-gray-400 mb-3">+ Custom Fields</h3>
-                <div class="flex gap-2">
-                    <input type="text" id="custField" placeholder="Field name" class="p-2 rounded w-1/3 text-sm">
-                    <input type="text" id="custVal" placeholder="Value" class="p-2 rounded w-1/2 text-sm">
-                    <button onclick="addCustomRow()" class="bg-emerald-600 px-4 py-2 rounded text-sm">Add</button>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-slate-800 p-6 rounded-xl">
+                <input type="file" id="fileInput" class="mb-4 text-sm">
+                <textarea id="textInput" rows="10" class="w-full p-3 rounded bg-slate-900 border border-slate-700" placeholder="Paste data here..."></textarea>
+                <div class="mt-4 flex gap-2">
+                    <button onclick="validateAndAnalyze()" id="analyzeBtn" class="bg-cyan-600 px-6 py-2 rounded flex items-center gap-2">
+                        <span id="analyzeText">Analyze</span>
+                        <div id="analyzeLoader" class="loader hidden"></div>
+                    </button>
+                    <button onclick="exportExcel()" id="exportBtn" class="bg-indigo-600 px-6 py-2 rounded flex items-center gap-2">
+                        <span id="exportText">Export Excel</span>
+                        <div id="exportLoader" class="loader hidden"></div>
+                    </button>
                 </div>
             </div>
-        </div>
 
-        <div class="glass p-6 rounded-xl">
-            <h2 class="text-lg font-semibold mb-4 text-blue-300">🕒 Last 10 Analysis</h2>
-            <div id="historyList" class="space-y-2 text-xs text-gray-400"></div>
+            <div class="bg-slate-800 p-6 rounded-xl overflow-x-auto">
+                <h3 class="font-bold mb-4 text-blue-300">Extracted Results</h3>
+                <table class="w-full text-sm">
+                    <tbody id="dataTable"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
     <script>
+        let isLoginMode = true;
+        let currentUser = null;
         let currentData = {};
 
-        async function doAnalyze() {
-            const fd = new FormData();
-            const file = document.getElementById('fileInput').files[0];
-            const text = document.getElementById('textInput').value;
-            if(file) fd.append('file', file);
-            fd.append('text', text);
-
-            const res = await fetch('/analyze', {method:'POST', body:fd});
-            currentData = await res.json();
-            renderTable();
-            loadHistory();
+        function toggleAuthMode() {
+            isLoginMode = !isLoginMode;
+            document.getElementById('authTitle').innerText = isLoginMode ? "Login" : "Register";
+            document.getElementById('authBtn').innerText = isLoginMode ? "Sign In" : "Sign Up";
         }
 
-        function renderTable() {
-            const tbody = document.getElementById('dataTable');
-            tbody.innerHTML = Object.entries(currentData).map(([k,v]) => 
-                `<tr class="border-b border-gray-800"><td class="py-3 font-medium text-blue-200">${k}</td><td class="text-gray-300">${v}</td></tr>`
-            ).join('');
-        }
+        async function handleAuth() {
+            const email = document.getElementById('authEmail').value;
+            const pass = document.getElementById('authPass').value;
+            if(!email || !pass) return alert("Fill all fields");
 
-        function addCustomRow() {
-            const k = document.getElementById('custField').value;
-            const v = document.getElementById('custVal').value;
-            if(k && v) {
-                currentData[k] = v;
-                renderTable();
-                document.getElementById('custField').value = '';
-                document.getElementById('custVal').value = '';
+            const endpoint = isLoginMode ? '/login' : '/register';
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({email, password: pass})
+            });
+
+            if(res.ok) {
+                const data = await res.json();
+                if(isLoginMode) {
+                    currentUser = data.user;
+                    showApp();
+                } else {
+                    alert("Registered! Please login.");
+                    toggleAuthMode();
+                }
+            } else {
+                alert("Auth failed!");
             }
         }
 
-        async function loadHistory() {
-            const res = await fetch('/history');
-            const data = await res.json();
-            document.getElementById('historyList').innerHTML = data.map(h => 
-                `<div class="p-2 bg-slate-800 rounded flex justify-between"><span>${h.Name} (${h.timestamp})</span><span class="text-blue-500 cursor-pointer" onclick='viewHistoryItem(${JSON.stringify(h)})'>View</span></div>`
+        function showApp() {
+            document.getElementById('authSection').classList.add('hidden');
+            document.getElementById('mainApp').classList.remove('hidden');
+            document.getElementById('userNameDisplay').innerText = currentUser.email;
+        }
+
+        function logout() {
+            location.reload();
+        }
+
+        async function validateAndAnalyze() {
+            const text = document.getElementById('textInput').value;
+            const file = document.getElementById('fileInput').files[0];
+            
+            if(!text && !file) {
+                alert("Please enter or paste data or upload a file!");
+                return;
+            }
+
+            // Start Animation
+            const btn = document.getElementById('analyzeBtn');
+            const loader = document.getElementById('analyzeLoader');
+            btn.disabled = true;
+            loader.classList.remove('hidden');
+            document.getElementById('analyzeText').innerText = "Analysing...";
+
+            setTimeout(async () => {
+                const fd = new FormData();
+                fd.append('text', text);
+                if(file) fd.append('file', file);
+
+                const res = await fetch('/analyze', {method:'POST', body:fd});
+                currentData = await res.json();
+                
+                // Stop Animation
+                btn.disabled = false;
+                loader.classList.add('hidden');
+                document.getElementById('analyzeText').innerText = "Analyze";
+                
+                renderTable();
+            }, 3000); // 3 Seconds Loading
+        }
+
+        function renderTable() {
+            document.getElementById('dataTable').innerHTML = Object.entries(currentData).map(([k,v]) => 
+                `<tr class="border-b border-slate-700"><td class="py-2 font-bold text-gray-400">${k}</td><td class="py-2 text-blue-200">${v}</td></tr>`
             ).join('');
         }
 
-        function viewHistoryItem(item) {
-            currentData = item;
-            renderTable();
-        }
+        async function exportExcel() {
+            if(Object.keys(currentData).length === 0) return alert("No data to export!");
 
-        async function exportToExcel() {
-            const res = await fetch('/export', {
-                method: 'POST', 
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify([currentData])
-            });
-            const blob = await res.blob();
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = "Extracted_Data.xlsx";
-            a.click();
-        }
+            const btn = document.getElementById('exportBtn');
+            const loader = document.getElementById('exportLoader');
+            btn.disabled = true;
+            loader.classList.remove('hidden');
+            document.getElementById('exportText').innerText = "Exporting...";
 
-        function clearAll() {
-            document.getElementById('textInput').value = '';
-            document.getElementById('dataTable').innerHTML = '';
-            currentData = {};
-        }
+            setTimeout(async () => {
+                const res = await fetch('/export', {
+                    method:'POST', 
+                    headers:{'Content-Type':'application/json'}, 
+                    body:JSON.stringify([currentData])
+                });
+                const blob = await res.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = "Data.xlsx";
+                a.click();
 
-        window.onload = loadHistory;
+                btn.disabled = false;
+                loader.classList.add('hidden');
+                document.getElementById('exportText').innerText = "Export Excel";
+            }, 2000);
+        }
     </script>
 </body>
 </html>
@@ -203,4 +267,4 @@ def home():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-        
+
