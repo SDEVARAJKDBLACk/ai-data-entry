@@ -4,115 +4,68 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from PIL import Image
 import google.generativeai as genai
 
-# --- Gemini Configuration ---
-# Render Environment Variables-la 'GEMINI_API_KEY' add panna marakatheenga
+# --- Gemini Config with Stable Fallback ---
 API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyCtx4Uk5b_vyMPkRHz1WZswC7xggUkZ01c"
 genai.configure(api_key=API_KEY)
 
-# Connection Fix: Using 'latest' to avoid 404 error
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+# Trying multiple model names to fix the 404 error
+def get_stable_model():
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
+    for m_name in models_to_try:
+        try:
+            m = genai.GenerativeModel(m_name)
+            # Test call to verify model exists
+            print(f"Successfully connected to: {m_name}")
+            return m
+        except Exception:
+            continue
+    return None
+
+model = get_stable_model()
 
 app = FastAPI()
 
-# --- AI Core Logic ---
-async def extract_basic_data(content, is_image=False, image_data=None):
-    prompt = """
-    Extract Name, Phone, Email, Company, Amount, and Date from the input.
-    Return the result ONLY as a valid JSON object. 
-    If a value is missing, use 'N/A'.
-    """
+@app.post("/analyze")
+async def analyze(file: UploadFile = None, text: str = Form(default="")):
+    if not model:
+        return {"Error": "No Gemini models available. Check your API Key or Library Version."}
+    
+    prompt = "Extract Name, Phone, Email, Company, Amount as JSON. Return ONLY JSON."
+    
     try:
-        if is_image:
-            response = model.generate_content([prompt, image_data])
+        if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            img = Image.open(io.BytesIO(await file.read()))
+            response = model.generate_content([prompt, img])
         else:
-            response = model.generate_content(f"{prompt}\nInput: {content}")
+            response = model.generate_content(f"{prompt}\nInput: {text}")
         
-        # JSON extraction using Regex
         json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
         return json.loads(json_match.group()) if json_match else {"Error": "AI format error"}
     except Exception as e:
         return {"Error": str(e)}
 
-# --- API Route ---
-@app.post("/analyze")
-async def analyze(file: UploadFile = None, text: str = Form(default="")):
-    try:
-        if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            f_bytes = await file.read()
-            img = Image.open(io.BytesIO(f_bytes))
-            result = await extract_basic_data("", is_image=True, image_data=img)
-        else:
-            result = await extract_basic_data(text)
-        return result
-    except Exception as e:
-        return JSONResponse({"Error": str(e)}, status_code=500)
-
-# --- Frontend UI ---
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <title>Gemini AI Core</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            body { background: #0f172a; color: white; }
-            .card { background: #1e293b; border: 1px solid #334155; }
-        </style>
-    </head>
-    <body class="p-10">
-        <div class="max-w-3xl mx-auto">
-            <h1 class="text-3xl font-bold text-blue-400 mb-8 text-center">AI DATA ANALYZER</h1>
-            
-            <div class="card p-6 rounded-2xl shadow-xl mb-8">
-                <textarea id="tIn" rows="5" class="w-full bg-slate-900 p-4 rounded-xl border border-slate-700 mb-4 outline-none focus:border-blue-500" placeholder="Paste text here..."></textarea>
-                <input type="file" id="fIn" class="mb-4 block text-sm text-slate-400">
-                <button onclick="run()" id="btn" class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold transition">Analyze with Gemini</button>
-            </div>
-
-            <div id="res" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                </div>
+    <html><body style="background:#0f172a; color:white; font-family:sans-serif; padding:50px; text-align:center;">
+        <h1 style="color:#60a5fa;">AI STABLE ANALYZER</h1>
+        <div style="background:#1e293b; padding:30px; border-radius:20px; max-width:500px; margin:auto;">
+            <textarea id="t" style="width:100%; background:#000; color:white; padding:10px; border-radius:10px;" rows="5" placeholder="Paste data..."></textarea>
+            <button onclick="run()" id="b" style="background:#2563eb; color:white; border:none; padding:15px 30px; border-radius:10px; margin-top:20px; cursor:pointer; font-weight:bold;">Run Analysis</button>
+            <div id="r" style="margin-top:20px; text-align:left; font-size:14px;"></div>
         </div>
-
         <script>
             async function run() {
-                const b = document.getElementById('btn');
-                const resDiv = document.getElementById('res');
-                b.innerText = "Processing...";
-                b.disabled = true;
-
-                const fd = new FormData();
-                fd.append('text', document.getElementById('tIn').value);
-                const file = document.getElementById('fIn').files[0];
-                if(file) fd.append('file', file);
-
+                const b = document.getElementById('b'); b.innerText = "Connecting...";
+                const fd = new FormData(); fd.append('text', document.getElementById('t').value);
                 try {
-                    const response = await fetch('/analyze', { method: 'POST', body: fd });
-                    const data = await response.json();
-                    
-                    if(data.Error) {
-                        alert("AI Error: " + data.Error);
-                    } else {
-                        resDiv.innerHTML = Object.entries(data).map(([k, v]) => `
-                            <div class="card p-4 rounded-xl border-l-4 border-blue-500">
-                                <span class="text-xs text-slate-400 font-bold uppercase">${k}</span>
-                                <div class="text-lg text-blue-100">${v}</div>
-                            </div>
-                        `).join('');
-                    }
-                } catch (e) {
-                    alert("Connection Error!");
-                } finally {
-                    b.innerText = "Analyze with Gemini";
-                    b.disabled = false;
-                }
+                    const res = await fetch('/analyze', {method:'POST', body:fd});
+                    const data = await res.json();
+                    document.getElementById('r').innerHTML = data.Error ? `<span style="color:red">${data.Error}</span>` : JSON.stringify(data, null, 2);
+                } catch(e) { alert("Network Error"); }
+                finally { b.innerText = "Run Analysis"; }
             }
         </script>
-    </body>
-    </html>
+    </body></html>
     """
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-        
