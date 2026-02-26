@@ -1,10 +1,9 @@
 fastapi
 uvicorn
+python-multipart
 google-generativeai
-pytesseract
-pillow
-pdfplumber
-python-docx
 pandas
 openpyxl
-python-multipart
+pillow
+PyPDF2
+python-docx
