@@ -1,251 +1,220 @@
-import os
-import io
-import json
-import base64
-import tempfile
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import google.generativeai as genai
-from PIL import Image
-import pytesseract
-import pdfplumber
-import docx
+import os, json, io
 import pandas as pd
+from datetime import datetime
+from PIL import Image
+import PyPDF2
+import docx
 
-# ================= CONFIG =================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-genai.configure(api_key=GEMINI_API_KEY)
+# ---------------- CONFIG ----------------
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash")
 
 app = FastAPI()
+history_store = []
+last_result = {}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---------------- FILE READERS ----------------
+def read_pdf(file):
+    reader = PyPDF2.PdfReader(file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() + "\n"
+    return text
 
-HISTORY = []
-LAST_ANALYSIS = {}
+def read_docx(file):
+    d = docx.Document(file)
+    return "\n".join([p.text for p in d.paragraphs])
 
-# ================= AI PROMPT =================
-SYSTEM_PROMPT = """
-You are an enterprise AI data extraction engine.
-
-TASK:
-Extract structured data from unstructured input text.
-
-RULES:
-- Extract HUMAN NAMES ONLY in Persons
-- Do NOT include company names, locations, places as persons
-- Separate Phone and Alternate Phone
-- Multiple values allowed
-- Salary only numeric
-- Amount only numeric
-- Products grouped
-- Dates grouped
-- Notes grouped
-- Address structured
-- Transactions structured
-- JSON output ONLY
-- No explanations
-- No markdown
-- No text outside JSON
-
-OUTPUT FORMAT STRICT JSON:
-
-{
-  "Persons": [],
-  "PersonalDetails": {},
-  "AddressDetails": {},
-  "FinancialInformation": {},
-  "ProductPurchaseDetails": [],
-  "Dates": {},
-  "TransactionDetails": {},
-  "Notes": [],
-  "CustomFields": {}
-}
-"""
-
-# ================= UTIL FUNCTIONS =================
-def gemini_analyze(text: str):
-    prompt = SYSTEM_PROMPT + "\n\nINPUT:\n" + text
-    response = model.generate_content(prompt)
-    raw = response.text.strip()
-
-    # Clean markdown if any
-    if raw.startswith("```"):
-        raw = raw.replace("```json", "").replace("```", "").strip()
-
-    try:
-        data = json.loads(raw)
-    except:
-        data = {"error": "AI_PARSE_ERROR", "raw": raw}
-
-    return data
-
-
-def extract_text_from_file(file: UploadFile):
-    name = file.filename.lower()
-
-    if name.endswith((".png", ".jpg", ".jpeg")):
-        image = Image.open(file.file)
-        return pytesseract.image_to_string(image)
-
-    elif name.endswith(".pdf"):
-        text = ""
-        with pdfplumber.open(file.file) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        return text
-
-    elif name.endswith(".docx"):
-        doc = docx.Document(file.file)
-        return "\n".join([p.text for p in doc.paragraphs])
-
-    elif name.endswith(".txt"):
-        return file.file.read().decode("utf-8")
-
-    else:
-        return ""
-
-# ================= FRONTEND =================
+# ---------------- UI ----------------
 @app.get("/", response_class=HTMLResponse)
-def ui():
+def home():
     return """
 <!DOCTYPE html>
 <html>
 <head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Data Entry Enterprise</title>
 <style>
-body{font-family:Arial;background:#0f172a;color:#fff;margin:0}
-.container{max-width:1400px;margin:auto;padding:20px}
+body{margin:0;font-family:Arial;background:#0f172a;color:white}
+.container{max-width:1100px;margin:auto;padding:20px}
 .card{background:#111827;border-radius:12px;padding:20px;margin-bottom:15px}
-textarea,input,button{width:100%;padding:10px;margin:5px 0;border-radius:6px;border:none}
-button{background:#2563eb;color:#fff;font-weight:bold;cursor:pointer}
-button:hover{background:#1d4ed8}
-table{width:100%;border-collapse:collapse;margin-top:10px}
-th,td{border:1px solid #334155;padding:8px}
-th{background:#1e293b}
-.section{margin-top:20px}
-.flex{display:flex;gap:10px}
+textarea,input{width:100%;padding:10px;border-radius:6px;border:none}
+button{padding:10px 15px;border:none;border-radius:6px;margin:5px;cursor:pointer}
+.btn1{background:#06b6d4}
+.btn2{background:#6366f1}
+.btn3{background:#22c55e}
+table{width:100%;border-collapse:collapse}
+td,th{border-bottom:1px solid #334155;padding:8px;text-align:left}
+@media(max-width:600px){
+table,thead,tbody,tr,td,th{font-size:12px}
+}
 </style>
 </head>
 <body>
 <div class="container">
-<h1>AI Data Entry Enterprise System</h1>
+
+<h2>AI Data Entry – Automated Data Worker</h2>
 
 <div class="card">
-<h3>Input Text</h3>
-<textarea id="text" rows="8"></textarea>
-
-<div class="flex">
-<input type="file" id="file"/>
-<button onclick="analyze()">Analyze</button>
-<button onclick="clearAll()">Clear</button>
-<button onclick="exportExcel()">Export Excel</button>
-</div>
-</div>
-
-<div class="card">
-<h3>Custom Field</h3>
-<input id="cfield" placeholder="Field Name"/>
-<input id="cvalue" placeholder="Field Value"/>
-<button onclick="addCustom()">Add Custom Field</button>
+<input type="file" id="fileInput"><br><br>
+<textarea id="textInput" rows="8" placeholder="Paste text / message / notes here..."></textarea><br>
+<button class="btn1" onclick="analyze()">Analyze</button>
+<button class="btn2" onclick="clearAll()">Clear</button>
+<button class="btn3" onclick="exportExcel()">Export Excel</button>
 </div>
 
 <div class="card">
 <h3>Extracted Data</h3>
-<pre id="output"></pre>
+<table id="resultTable">
+<tr><th>Field</th><th>Value</th></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>Custom Fields</h3>
+<input id="cfield" placeholder="Field name">
+<input id="cvalue" placeholder="Value">
+<button onclick="addCustom()">Add</button>
+</div>
+
+<div class="card">
+<h3>Last Analysis</h3>
+<ul id="history"></ul>
 </div>
 
 </div>
 
 <script>
-let extracted = {}
-
 async function analyze(){
-    let text = document.getElementById("text").value
-    let file = document.getElementById("file").files[0]
+    let fd = new FormData();
+    let text = document.getElementById("textInput").value;
+    let file = document.getElementById("fileInput").files[0];
+    if(file){fd.append("file",file);}
+    fd.append("text",text);
 
-    let fd = new FormData()
-    fd.append("text", text)
-    if(file) fd.append("file", file)
+    let res = await fetch("/api/analyze",{method:"POST",body:fd});
+    let data = await res.json();
 
-    let res = await fetch("/analyze",{method:"POST",body:fd})
-    let data = await res.json()
-    extracted = data
-    document.getElementById("output").innerText = JSON.stringify(data,null,2)
+    let table = document.getElementById("resultTable");
+    table.innerHTML="<tr><th>Field</th><th>Value</th></tr>";
+
+    for(let k in data){
+        let row = `<tr><td>${k}</td><td>${JSON.stringify(data[k])}</td></tr>`;
+        table.innerHTML+=row;
+    }
+    loadHistory();
 }
 
 function clearAll(){
-    document.getElementById("text").value=""
-    document.getElementById("output").innerText=""
-    extracted={}
+    document.getElementById("textInput").value="";
+    document.getElementById("fileInput").value="";
+    document.getElementById("resultTable").innerHTML="<tr><th>Field</th><th>Value</th></tr>";
 }
 
 async function exportExcel(){
-    let res = await fetch("/export",{method:"POST",headers:{'Content-Type':'application/json'},body:JSON.stringify(extracted)})
-    let blob = await res.blob()
-    let a = document.createElement("a")
-    a.href = URL.createObjectURL(blob)
-    a.download = "ai_data.xlsx"
-    a.click()
+    window.open("/api/export","_blank");
 }
 
 function addCustom(){
-    let f = document.getElementById("cfield").value
-    let v = document.getElementById("cvalue").value
-    if(!extracted.CustomFields) extracted.CustomFields={}
-    extracted.CustomFields[f]=v
-    document.getElementById("output").innerText = JSON.stringify(extracted,null,2)
+    let f=document.getElementById("cfield").value;
+    let v=document.getElementById("cvalue").value;
+    let table=document.getElementById("resultTable");
+    table.innerHTML+=`<tr><td>${f}</td><td>${v}</td></tr>`;
+}
+
+async function loadHistory(){
+    let r=await fetch("/api/history");
+    let d=await r.json();
+    let h=document.getElementById("history");
+    h.innerHTML="";
+    d.forEach(i=>{h.innerHTML+=`<li>${i}</li>`})
 }
 </script>
 </body>
 </html>
 """
 
-# ================= API =================
-@app.post("/analyze")
+# ---------------- ANALYZE ----------------
+@app.post("/api/analyze")
 async def analyze(text: str = Form(""), file: UploadFile = File(None)):
-    content = text or ""
+    content = ""
+
     if file:
-        content += "\n" + extract_text_from_file(file)
-
-    ai_data = gemini_analyze(content)
-
-    HISTORY.append(ai_data)
-    global LAST_ANALYSIS
-    LAST_ANALYSIS = ai_data
-
-    return JSONResponse(ai_data)
-
-
-@app.post("/export")
-async def export_excel(data: dict):
-    rows = []
-
-    def flatten(prefix, obj):
-        if isinstance(obj, dict):
-            for k,v in obj.items():
-                flatten(f"{prefix}.{k}" if prefix else k, v)
-        elif isinstance(obj, list):
-            for i,v in enumerate(obj):
-                flatten(f"{prefix}[{i}]", v)
+        fname = file.filename.lower()
+        if fname.endswith(".pdf"):
+            content = read_pdf(file.file)
+        elif fname.endswith(".docx"):
+            content = read_docx(file.file)
+        elif fname.endswith((".png",".jpg",".jpeg",".webp")):
+            img = Image.open(file.file)
+            response = model.generate_content([
+                "Extract structured data from this image and return JSON",
+                img
+            ])
+            raw = response.text.replace("```json","").replace("```","")
+            data = json.loads(raw)
+            last_result.update(data)
+            history_store.append(datetime.now().isoformat())
+            return JSONResponse(data)
         else:
-            rows.append({"Field":prefix,"Value":obj})
+            content = file.file.read().decode(errors="ignore")
 
-    flatten("", data)
+    content = content + "\n" + text
 
-    df = pd.DataFrame(rows)
-    buf = io.BytesIO()
-    df.to_excel(buf,index=False)
-    buf.seek(0)
+    prompt = f"""
+Extract structured enterprise data and return ONLY JSON.
+Fields:
+Persons (human names only)
+PersonalDetails
+AddressDetails
+FinancialInfo
+ProductDetails
+Dates
+TransactionDetails
+Notes
 
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition":"attachment; filename=ai_data.xlsx"})
+Text:
+{content}
+"""
+
+    response = model.generate_content(prompt)
+    raw = response.text.replace("```json","").replace("```","")
+
+    data = json.loads(raw)
+    last_result.clear()
+    last_result.update(data)
+
+    history_store.append(datetime.now().isoformat())
+    if len(history_store)>10:
+        history_store.pop(0)
+
+    return JSONResponse(data)
+
+# ---------------- EXPORT ----------------
+@app.get("/api/export")
+def export_excel():
+    if not last_result:
+        df = pd.DataFrame([{"info":"No data"}])
+    else:
+        rows=[]
+        for k,v in last_result.items():
+            rows.append({"Field":k,"Value":json.dumps(v)})
+        df = pd.DataFrame(rows)
+
+    stream = io.BytesIO()
+    df.to_excel(stream,index=False)
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":"attachment; filename=ai_data_entry.xlsx"}
+    )
+
+# ---------------- HISTORY ----------------
+@app.get("/api/history")
+def history():
+    return history_store
