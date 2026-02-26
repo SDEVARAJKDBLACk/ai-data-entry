@@ -5,80 +5,58 @@ from PIL import Image
 import google.generativeai as genai
 from google.generativeai.types import RequestOptions
 
-# --- Gemini Configuration ---
-# Render Environment-la ulla key-ai edukkirom
+# Render environment variables configuration
 API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyCtx4Uk5b_vyMPkRHz1WZswC7xggUkZ01c"
 genai.configure(api_key=API_KEY)
 
-def get_available_model():
-    """Available-aa irukkira Gemini model-ai v1 version-la connect pannum"""
-    # 404 error fix panna v1 API-ai force panrom
-    test_models = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
-    for m_name in test_models:
-        try:
-            model = genai.GenerativeModel(
-                model_name=m_name,
-                request_options=RequestOptions(api_version='v1')
-            )
-            return model, m_name
-        except:
-            continue
-    return None, "None"
+# Force v1 API version to fix 404 errors
+model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash',
+    request_options=RequestOptions(api_version='v1')
+)
 
-model, active_model_name = get_available_model()
 app = FastAPI()
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = None, text: str = Form(default="")):
-    if not model:
-        return {"Error": "No Gemini models available. Check API Key."}
-    
-    prompt = "Extract Name, Phone, Email, Amount as JSON. Return ONLY JSON."
     try:
+        prompt = "Extract Name, Phone, Email, Amount as JSON. Return ONLY JSON."
         if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
             img = Image.open(io.BytesIO(await file.read()))
             response = model.generate_content([prompt, img])
         else:
             response = model.generate_content(f"{prompt}\nInput: {text}")
         
+        # Extracting JSON from AI response
         json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        return json.loads(json_match.group()) if json_match else {"Error": "AI format error"}
+        return json.loads(json_match.group()) if json_match else {"Error": "AI format mismatch"}
     except Exception as e:
         return {"Error": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    status_color = "text-green-400" if model else "text-red-500"
-    return f"""
-    <html><head><script src="https://cdn.tailwindcss.com"></script></head>
-    <body class="bg-slate-950 text-white p-10">
-        <div class="max-w-2xl mx-auto bg-slate-900 p-8 rounded-3xl border border-slate-800">
-            <div class="flex justify-between items-center mb-6">
-                <h1 class="text-2xl font-bold text-blue-500">AI DATA ENTRY</h1>
-                <span class="text-[10px] font-mono {status_color}">Active: {active_model_name}</span>
-            </div>
-            <textarea id="t" class="w-full bg-black p-4 rounded-xl border border-slate-800 mb-4 h-32" placeholder="Paste text..."></textarea>
-            <input type="file" id="f" class="mb-6 block text-xs">
-            <button onclick="run()" id="btn" class="w-full bg-blue-600 py-4 rounded-2xl font-bold hover:bg-blue-500 transition-all">Start Analysis</button>
-            <div id="res" class="mt-8 space-y-2"></div>
+    return """
+    <html><body style="background:#0b0f1a; color:white; padding:50px; font-family:sans-serif; text-align:center;">
+        <div style="max-width:500px; margin:auto; background:#1e293b; padding:30px; border-radius:20px; border:1px solid #334155;">
+            <h2 style="color:#60a5fa">Gemini AI Stable Fix</h2>
+            <textarea id="t" style="width:100%; height:120px; background:#020617; color:white; border-radius:10px; padding:10px; margin-bottom:15px;" placeholder="Paste text..."></textarea>
+            <input type="file" id="f" style="margin-bottom:20px; font-size:12px; display:block; width:100%;">
+            <button onclick="run()" id="b" style="width:100%; padding:15px; background:#2563eb; color:white; border:none; border-radius:12px; font-weight:bold; cursor:pointer;">Analyze Now</button>
+            <div id="r" style="margin-top:25px; text-align:left; color:#94a3b8; background:#0f172a; padding:15px; border-radius:10px;"></div>
         </div>
         <script>
-            async function run() {{
-                const b = document.getElementById('btn'); b.innerText = "Analyzing...";
+            async function run() {
+                const b = document.getElementById('b'); b.innerText = "Analyzing...";
                 const fd = new FormData();
                 fd.append('text', document.getElementById('t').value);
                 if(document.getElementById('f').files[0]) fd.append('file', document.getElementById('f').files[0]);
-                try {{
-                    const res = await fetch('/analyze', {{method:'POST', body:fd}});
+                try {
+                    const res = await fetch('/analyze', {method:'POST', body:fd});
                     const data = await res.json();
-                    if(data.Error) alert(data.Error);
-                    else document.getElementById('res').innerHTML = Object.entries(data).map(([k,v])=>`
-                        <div class='bg-black p-3 rounded-lg border border-slate-800 flex justify-between'>
-                            <b class='text-blue-400 text-[10px] uppercase'>${{k}}</b><span class='text-sm'>${{v}}</span>
-                        </div>`).join('');
-                }} catch(e) {{ alert("Server Error"); }}
-                finally {{ b.innerText = "Start Analysis"; }}
-            }}
+                    document.getElementById('r').innerHTML = data.Error ? `<span style="color:red">${data.Error}</span>` : `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                } catch(e) { alert("Error!"); }
+                finally { b.innerText = "Analyze Now"; }
+            }
         </script>
     </body></html>
     """
