@@ -4,19 +4,19 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# 1. API Key Setup (Render Environment Variables-ilirundhu)
+# 1. API Configuration
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    # Simple setup - Render-la error varaamal irukka idhu dhaan best
+    # INDHA LINE THAAN FIX: Default settings use pannuvom, version force panna koodaadhu
     model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     model = None
 
 app = FastAPI()
 
-# 2. CORS Middleware (Frontend connect aaga mukhya vishayam)
+# 2. CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,16 +31,22 @@ async def home():
     <head>
         <title>AI Stable Chat</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:#121212; color:white; font-family:sans-serif; text-align:center; padding:20px; }
+            #chatbox { background:#1e1e1e; padding:15px; border-radius:10px; max-width:500px; margin:auto; height:350px; overflow-y:auto; text-align:left; border:1px solid #333; }
+            .input-area { max-width:500px; margin:20px auto; display:flex; gap:10px; }
+            input { flex:1; padding:12px; border-radius:8px; border:none; }
+            button { padding:12px 20px; background:#2563eb; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; }
+        </style>
     </head>
-    <body style="background:#121212; color:white; font-family:sans-serif; text-align:center; padding:20px;">
+    <body>
         <h2>🤖 AI Chatbot (Live)</h2>
-        <div id="chatbox" style="background:#1e1e1e; padding:15px; border-radius:10px; max-width:500px; margin:auto; height:350px; overflow-y:auto; text-align:left; border:1px solid #333; font-size: 14px;">
-            <p style="color:#888;">AI: Ready! Type something to start chatting...</p>
+        <div id="chatbox">
+            <p style="color:#888;">AI: Ready! Type something...</p>
         </div>
-        <br>
-        <div style="max-width:500px; margin:auto; display:flex; gap:10px;">
-            <input type="text" id="userInput" style="flex:1; padding:12px; border-radius:8px; border:none;" placeholder="Type here...">
-            <button onclick="send()" style="padding:12px 20px; background:#2563eb; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold;">SEND</button>
+        <div class="input-area">
+            <input type="text" id="userInput" placeholder="Type here...">
+            <button onclick="send()">SEND</button>
         </div>
 
         <script>
@@ -67,10 +73,10 @@ async def home():
                     if(data.reply) {
                         chat.innerHTML += `<p style="color:#60a5fa;"><b>AI:</b> ${data.reply}</p>`;
                     } else {
-                        chat.innerHTML += `<p style="color:red;"><b>Error:</b> ${data.error || 'Unknown error'}</p>`;
+                        chat.innerHTML += `<p style="color:red;"><b>Error:</b> ${data.error || 'Check logs'}</p>`;
                     }
                 } catch(e) {
-                    chat.innerHTML += `<p style="color:red;"><b>Error:</b> Server offline or connection lost.</p>`;
+                    chat.innerHTML += `<p style="color:red;"><b>Error:</b> Connection failed.</p>`;
                 }
                 chat.scrollTop = chat.scrollHeight;
             }
@@ -82,12 +88,11 @@ async def home():
 @app.post("/chat")
 async def chat(message: str = Form(...)):
     if not model:
-        return {"reply": "Error: API Key is not set in Render environment."}
+        return {"reply": "Error: API Key missing in Render Environment Settings."}
     try:
-        # Standard generation call
+        # Simple generation call - No extra options to avoid 404
         response = model.generate_content(message)
         return {"reply": response.text}
     except Exception as e:
-        # Inga varra actual error-ai report pannuvom (e.g., Quota limit)
         return {"reply": f"Gemini Error: {str(e)}"}
-        
+    
