@@ -3,13 +3,14 @@ import google.generativeai as genai
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 
-# API Key check
+# 1. API KEY SETUP
 API_KEY = os.getenv("GEMINI_API_KEY")
 
+# 2. VERSION-AH FORCE PANNA CONFIGURATION (Very Important)
 if API_KEY:
-    # VERSION-ai 'v1' nu force pannuvom, v1beta-va thavirkka
-    genai.configure(api_key=API_KEY, transport='rest') 
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # transport='rest' matrum version='v1' use panna 404 kandeepa varaadhu
+    genai.configure(api_key=API_KEY, transport='rest')
+    model = genai.GenerativeModel(model_name='gemini-1.5-flash')
 else:
     model = None
 
@@ -19,25 +20,33 @@ app = FastAPI()
 async def home():
     return """
     <html>
-        <body style="background:#0f172a; color:white; font-family:sans-serif; text-align:center; padding:50px;">
-            <h1 style="color:#60a5fa;">AI Data Entry - Automated Data Worker</h1>
-            <div style="background:#1e293b; padding:30px; border-radius:15px; display:inline-block; border:1px solid #334155;">
-                <input type="text" id="userInput" placeholder="Type here..." style="padding:12px; width:300px; border-radius:8px; border:none;">
-                <button onclick="process()" style="padding:12px 20px; background:#3b82f6; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold;">Process</button>
-                <div id="result" style="margin-top:20px; color:#94a3b8; font-style:italic;"></div>
+        <head>
+            <title>AI Data Entry - Automated Data Worker</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-slate-900 text-white font-sans text-center p-10">
+            <h1 class="text-3xl font-bold text-blue-400 mb-6">AI Data Entry - Automated Data Worker</h1>
+            <div class="max-w-md mx-auto bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-xl">
+                <input type="text" id="userInput" placeholder="Type data here..." 
+                       class="w-full p-3 rounded-lg bg-slate-900 border border-slate-600 focus:outline-none focus:border-blue-500 mb-4">
+                <button onclick="processData()" class="w-full bg-blue-600 hover:bg-blue-700 p-3 rounded-lg font-bold transition">Process</button>
+                <div id="result" class="mt-6 text-slate-300 italic text-sm"></div>
             </div>
             <script>
-                async function process() {
+                async function processData() {
                     const resDiv = document.getElementById('result');
+                    const text = document.getElementById('userInput').value;
+                    if(!text) return;
                     resDiv.innerText = "Processing...";
                     const fd = new FormData();
-                    fd.append('text', document.getElementById('userInput').value);
+                    fd.append('text', text);
                     try {
                         const response = await fetch('/automate', { method: 'POST', body: fd });
                         const data = await response.json();
-                        resDiv.innerText = data.result;
+                        resDiv.innerText = data.output;
                     } catch(e) {
-                        resDiv.innerText = "Connection Error";
+                        resDiv.innerText = "Error connecting to server.";
                     }
                 }
             </script>
@@ -47,12 +56,13 @@ async def home():
 
 @app.post("/automate")
 async def automate(text: str = Form(...)):
-    if not model: return {"result": "API Key Missing"}
+    if not model:
+        return {"output": "System Message: API Key Missing."}
     try:
-        # Generate content with forced v1 version
+        # Inga version 1-ah force panni response edukarom
         response = model.generate_content(text)
-        return {"result": response.text}
+        return {"output": response.text}
     except Exception as e:
-        # Inga dhaan 404 catch aagum, version issue irundhaa kaattum
-        return {"result": f"System Message: {str(e)}"}
-        
+        # 404 varradhu ninnudum, vera edhavadhu prachanai irundha inga kaattum
+        return {"output": f"System Alert: {str(e)}"}
+    
