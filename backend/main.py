@@ -2,11 +2,20 @@ import os
 import google.generativeai as genai
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
+from google.generativeai.types import RequestOptions
 
-# API Key - Render settings-la GEMINI_API_KEY nu variable irukkanum
+# API Key check
 API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+    # FORCING API VERSION V1 - This is the key fix
+    model = genai.GenerativeModel(
+        model_name='gemini-1.5-flash',
+        request_options=RequestOptions(api_version='v1')
+    )
+else:
+    model = None
 
 app = FastAPI()
 
@@ -14,18 +23,18 @@ app = FastAPI()
 async def home():
     return """
     <html>
-    <head><title>Simple AI Bot</title></head>
+    <head><title>AI Stable Chat</title></head>
     <body style="background:#121212; color:white; font-family:sans-serif; text-align:center; padding:50px;">
-        <h2>🤖 Simple AI Chatbot</h2>
+        <h2>🤖 AI Chatbot (V1 Stable)</h2>
         <div id="chatbox" style="background:#1e1e1e; padding:20px; border-radius:10px; max-width:500px; margin:auto; height:300px; overflow-y:auto; text-align:left; border:1px solid #333;">
-            <p style="color:#888;">AI: Hello! Ask me anything...</p>
+            <p style="color:#888;">AI: Ready for stable chat. Type something...</p>
         </div>
         <br>
-        <input type="text" id="userInput" style="width:350px; padding:10px; border-radius:5px; border:none;" placeholder="Type message...">
-        <button onclick="sendMessage()" style="padding:10px 20px; background:blue; color:white; border:none; border-radius:5px; cursor:pointer;">Send</button>
+        <input type="text" id="userInput" style="width:300px; padding:12px; border-radius:8px; border:none;" placeholder="Say Hi...">
+        <button onclick="send()" style="padding:12px 20px; background:#2563eb; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold;">SEND</button>
 
         <script>
-            async function sendMessage() {
+            async function send() {
                 const input = document.getElementById('userInput');
                 const chat = document.getElementById('chatbox');
                 const msg = input.value;
@@ -34,13 +43,17 @@ async def home():
                 chat.innerHTML += `<p><b>You:</b> ${msg}</p>`;
                 input.value = "";
 
-                const response = await fetch('/chat', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                    body: `message=${encodeURIComponent(msg)}`
-                });
-                const data = await response.json();
-                chat.innerHTML += `<p style="color:#00ff00;"><b>AI:</b> ${data.reply}</p>`;
+                try {
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                        body: `message=${encodeURIComponent(msg)}`
+                    });
+                    const data = await response.json();
+                    chat.innerHTML += `<p style="color:#60a5fa;"><b>AI:</b> ${data.reply}</p>`;
+                } catch(e) {
+                    chat.innerHTML += `<p style="color:red;"><b>Error:</b> Could not connect.</p>`;
+                }
                 chat.scrollTop = chat.scrollHeight;
             }
         </script>
@@ -50,9 +63,12 @@ async def home():
 
 @app.post("/chat")
 async def chat(message: str = Form(...)):
+    if not model:
+        return {"reply": "Error: GEMINI_API_KEY missing in Render environment."}
     try:
+        # Simple generate call
         response = model.generate_content(message)
         return {"reply": response.text}
     except Exception as e:
-        return {"reply": f"Error: {str(e)}"}
-        
+        # Inga varra error-ai direct-aa report pannuvom
+        return {"reply": f"Gemini Error: {str(e)}"}
