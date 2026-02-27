@@ -1,23 +1,30 @@
-import os
+import os  # 'i' should be lowercase
 import google.generativeai as genai
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 from google.generativeai.types import RequestOptions
+from fastapi.middleware.cors import CORSMiddleware
 
 # API Key check
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    # FORCING API VERSION V1 - This is the key fix
     model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        request_options=RequestOptions(api_version='v1')
+        model_name='gemini-1.5-flash'
     )
 else:
     model = None
 
 app = FastAPI()
+
+# Frontend connect aaga idhu mukkiyam
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -44,10 +51,12 @@ async def home():
                 input.value = "";
 
                 try {
+                    const formData = new FormData();
+                    formData.append('message', msg);
+
                     const response = await fetch('/chat', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                        body: `message=${encodeURIComponent(msg)}`
+                        body: formData
                     });
                     const data = await response.json();
                     chat.innerHTML += `<p style="color:#60a5fa;"><b>AI:</b> ${data.reply}</p>`;
@@ -66,10 +75,8 @@ async def chat(message: str = Form(...)):
     if not model:
         return {"reply": "Error: GEMINI_API_KEY missing in Render environment."}
     try:
-        # Simple generate call
         response = model.generate_content(message)
         return {"reply": response.text}
     except Exception as e:
-        # Inga varra error-ai direct-aa report pannuvom
         return {"reply": f"Gemini Error: {str(e)}"}
-  
+        
