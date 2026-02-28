@@ -1,7 +1,5 @@
 streamlit
 pandas
-spacy
+nltk
 PyPDF2
 python-docx
-pytesseract
-pillow
