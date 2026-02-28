@@ -1,25 +1,42 @@
 import streamlit as st
 import re
-import spacy
 import pandas as pd
 import io
 import os
+import nltk
 from datetime import datetime
 
-# --- NLP Model Loading ---
+# --- NLP setup with NLTK (Lightweight Replacement for Spacy) ---
 @st.cache_resource
-def load_nlp():
+def setup_nltk():
     try:
-        return spacy.load("en_core_web_sm")
-    except:
-        return None
+        nltk.download('punkt')
+        nltk.download('averaged_perceptron_tagger')
+        nltk.download('maxent_ne_chunker')
+        nltk.download('words')
+        nltk.download('punkt_tab')
+    except Exception as e:
+        st.error(f"NLTK Download Error: {e}")
 
-nlp = load_nlp()
+setup_nltk()
+
+def extract_entities_nltk(text):
+    names = []
+    locations = []
+    try:
+        for chunk in nltk.ne_chunk(nltk.pos_tag(nltk.word_tokenize(text))):
+            if hasattr(chunk, 'label'):
+                if chunk.label() == 'PERSON':
+                    names.append(' '.join(c[0] for c in chunk))
+                elif chunk.label() in ['GPE', 'LOCATION']:
+                    locations.append(' '.join(c[0] for c in chunk))
+    except:
+        pass
+    return list(set(names)), list(set(locations))
 
 # --- Page Configuration & Dark UI ---
 st.set_page_config(page_title="AI Data Entry Pro", layout="wide")
 
-# Exact UI Design from your requirements
 st.markdown("""
     <style>
     .stApp { background-color: #0b0e14; color: #e2e8f0; }
@@ -27,7 +44,6 @@ st.markdown("""
     textarea, input { background-color: #ffffff !important; color: #000000 !important; border-radius: 8px !important; font-size: 16px !important; }
     .stButton>button { border-radius: 8px; font-weight: 600; width: 100%; height: 50px; transition: 0.3s; }
     
-    /* Button Colors */
     div[data-testid="stHorizontalBlock"] > div:nth-child(1) button { background-color: #00bcd4 !important; color: white; border: none; } 
     div[data-testid="stHorizontalBlock"] > div:nth-child(2) button { background-color: #3f51b5 !important; color: white; border: none; }
     div[data-testid="stHorizontalBlock"] > div:nth-child(3) button { background-color: #673ab7 !important; color: white; border: none; }
@@ -37,7 +53,6 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Initialize Session States
 if 'history' not in st.session_state: st.session_state.history = []
 if 'extracted_results' not in st.session_state: st.session_state.extracted_results = {}
 
@@ -84,13 +99,10 @@ def deep_analyze(text):
             val = matches if len(matches) > 1 else matches[0]
             found[key] = val[0] if isinstance(val, tuple) else val
 
-    # 2. NLP Entities (Names & Locations)
-    if nlp:
-        doc = nlp(text)
-        names = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
-        locs = [ent.text for ent in doc.ents if ent.label_ in ["GPE", "LOC"]]
-        if names: found["Detected_Names"] = list(set(names))
-        if locs: found["Detected_Locations"] = list(set(locs))
+    # 2. NLP Replacement (NLTK)
+    names, locations = extract_entities_nltk(text)
+    if names: found["Detected_Names"] = names
+    if locations: found["Detected_Locations"] = locations
     
     return found
 
@@ -98,8 +110,8 @@ def deep_analyze(text):
 st.title("AI Data Entry – Automated Data Worker")
 
 with st.container():
-    st.markdown("### 📂 Upload text / notes / message / PDF / Word")
-    file = st.file_uploader("", type=['pdf','docx','png','jpg','jpeg','txt'], label_visibility="collapsed")
+    st.markdown("### 📂 Upload text / PDF / Word")
+    file = st.file_uploader("", type=['pdf','docx','txt'], label_visibility="collapsed")
     
     st.markdown("### Enter or paste input")
     raw_input = st.text_area("", height=250, label_visibility="collapsed", placeholder="Paste your bulk data here...")
@@ -108,7 +120,7 @@ with st.container():
     
     if c1.button("Analyze"):
         if raw_input:
-            with st.spinner("Deep Scanning Patterns..."):
+            with st.spinner("Scanning Patterns..."):
                 results = deep_analyze(raw_input)
                 st.session_state.extracted_results = results
                 if results:
@@ -125,7 +137,6 @@ with st.container():
             df = pd.DataFrame(st.session_state.history)
             st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "data_export.csv", "text/csv")
 
-# Results Display
 st.markdown("---")
 st.markdown("### Extracted Data:")
 if st.session_state.extracted_results:
@@ -134,9 +145,8 @@ if st.session_state.extracted_results:
         target_col = col_a if i % 2 == 0 else col_b
         target_col.markdown(f"""<div class="extracted-box"><b>{k}:</b><br>{v}</div>""", unsafe_allow_html=True)
 else:
-    st.info("Results will appear here after analysis.")
+    st.info("Results will appear here.")
 
-# History Section
 st.markdown("---")
 st.markdown("### 🕒 Last 10 Analysis")
 if st.session_state.history:
